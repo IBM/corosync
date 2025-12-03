@@ -38,7 +38,8 @@
 #include <corosync/mar_gen.h>
 #define VOTEQUORUM_QDEVICE_NODEID              0
 #define VOTEQUORUM_QDEVICE_MAX_NAME_LEN      255
-#define VOTEQUORUM_QDEVICE_DEFAULT_TIMEOUT 10000
+#define VOTEQUORUM_QDEVICE_DEFAULT_TIMEOUT 10000 //units are milliseconds 
+#define VOTEQUORUM_PRDEV_KEY_LENGTH 16
 
 /**
  * @brief The req_votequorum_types enum
@@ -53,7 +54,9 @@ enum req_votequorum_types {
 	MESSAGE_REQ_VOTEQUORUM_QDEVICE_UNREGISTER,
 	MESSAGE_REQ_VOTEQUORUM_QDEVICE_UPDATE,
 	MESSAGE_REQ_VOTEQUORUM_QDEVICE_POLL,
-	MESSAGE_REQ_VOTEQUORUM_QDEVICE_MASTER_WINS
+	MESSAGE_REQ_VOTEQUORUM_QDEVICE_MASTER_WINS,
+	MESSAGE_REQ_VOTEQUORUM_QDISK_POLL,
+	MESSAGE_REQ_VOTEQUORUM_QDISK_MCAST_KEY
 };
 
 /**
@@ -112,6 +115,15 @@ struct req_lib_votequorum_qdevice_poll {
 };
 
 /**
+ * @brief The req_lib_votequorum_qdisk_key struct
+ */
+struct req_lib_votequorum_qdisk_key {
+	struct qb_ipc_response_header header __attribute__((aligned(8)));
+	uint64_t ikey;
+};
+
+
+/**
  * @brief The req_lib_votequorum_qdevice_master_wins struct
  */
 struct req_lib_votequorum_qdevice_master_wins {
@@ -168,6 +180,7 @@ struct res_lib_votequorum_status {
 	struct qb_ipc_response_header header __attribute__((aligned(8)));
 };
 
+
 #define VOTEQUORUM_INFO_TWONODE                 1
 #define VOTEQUORUM_INFO_QUORATE                 2
 #define VOTEQUORUM_INFO_WAIT_FOR_ALL	        4
@@ -178,6 +191,9 @@ struct res_lib_votequorum_status {
 #define VOTEQUORUM_INFO_QDEVICE_ALIVE         128
 #define VOTEQUORUM_INFO_QDEVICE_CAST_VOTE     256
 #define VOTEQUORUM_INFO_QDEVICE_MASTER_WINS   512
+#define VOTEQUORUM_INFO_QDISK_CAST_VOTE      1024
+#define VOTEQUORUM_INFO_QDISK_RECV_VOTE      2048
+
 
 #define VOTEQUORUM_NODESTATE_MEMBER     1
 #define VOTEQUORUM_NODESTATE_DEAD       2
@@ -198,6 +214,7 @@ struct res_lib_votequorum_getinfo {
 	unsigned int flags;
 	unsigned int qdevice_votes;
 	char qdevice_name[VOTEQUORUM_QDEVICE_MAX_NAME_LEN];
+	uint64_t qdisk_ikey;
 };
 
 /**

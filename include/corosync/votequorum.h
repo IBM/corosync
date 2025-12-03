@@ -57,11 +57,14 @@ typedef uint64_t votequorum_handle_t;
 #define VOTEQUORUM_INFO_QDEVICE_ALIVE            128
 #define VOTEQUORUM_INFO_QDEVICE_CAST_VOTE        256
 #define VOTEQUORUM_INFO_QDEVICE_MASTER_WINS      512
+#define VOTEQUORUM_INFO_QDISK_CAST_VOTE         1024
+#define VOTEQUORUM_INFO_QDISK_RECV_VOTE         2048
 
 #define VOTEQUORUM_QDEVICE_NODEID                0
 #define VOTEQUORUM_QDEVICE_MAX_NAME_LEN          255
 #define VOTEQUORUM_QDEVICE_DEFAULT_TIMEOUT       10000
 #define VOTEQUORUM_QDEVICE_DEFAULT_SYNC_TIMEOUT  30000
+#define VOTEQUORUM_PRDEV_KEY_LENGTH 16
 
 #define VOTEQUORUM_NODESTATE_MEMBER              1
 #define VOTEQUORUM_NODESTATE_DEAD                2
@@ -83,6 +86,7 @@ struct votequorum_info {
 	unsigned int flags;
 	unsigned int qdevice_votes;
 	char qdevice_name[VOTEQUORUM_QDEVICE_MAX_NAME_LEN];
+	uint64_t qdisk_ikey;
 };
 
 /**
@@ -310,6 +314,28 @@ cs_error_t votequorum_qdevice_master_wins (
 	votequorum_handle_t handle,
 	const char *name,
 	unsigned int allow);
+	
+/**
+ * @brief Poll a quorum disk
+ * @param handle
+ * @param name
+ * @param allow
+ * @return
+ */
+cs_error_t votequorum_qdisk_poll (
+	votequorum_handle_t handle,
+	const char *name,
+	unsigned int cast_vote,
+	votequorum_ring_id_t ring_id);
+
+/**
+ * @brief Send Persistent Reserve Key
+ * @param key
+ * @return
+ */
+cs_error_t votequorum_qdisk_share_key (
+	votequorum_handle_t handle,
+	uint64_t key);
 
 #ifdef __cplusplus
 }

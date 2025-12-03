@@ -192,6 +192,8 @@ cs_error_t votequorum_getinfo (
 	info->qdevice_votes = res_lib_votequorum_getinfo.qdevice_votes;
 	memset(info->qdevice_name, 0, VOTEQUORUM_QDEVICE_MAX_NAME_LEN);
 	strcpy(info->qdevice_name, res_lib_votequorum_getinfo.qdevice_name);
+	info->qdisk_ikey = res_lib_votequorum_getinfo.qdisk_ikey;
+	
 
 error_exit:
 	hdb_handle_put (&votequorum_handle_t_db, handle);
@@ -797,6 +799,94 @@ cs_error_t votequorum_qdevice_unregister (
 		1,
                 &res_lib_votequorum_status,
 		sizeof (struct res_lib_votequorum_status), CS_IPC_TIMEOUT_MS));
+
+	if (error != CS_OK) {
+		goto error_exit;
+	}
+
+	error = res_lib_votequorum_status.header.error;
+
+error_exit:
+	hdb_handle_put (&votequorum_handle_t_db, handle);
+
+	return (error);
+}
+
+cs_error_t votequorum_qdisk_poll (
+	votequorum_handle_t handle,
+	const char *name,
+	unsigned int cast_vote,
+	votequorum_ring_id_t ring_id)
+{
+	cs_error_t error;
+	struct votequorum_inst *votequorum_inst;
+	struct iovec iov;
+	struct req_lib_votequorum_qdevice_poll req_lib_votequorum_qdevice_poll;
+	struct res_lib_votequorum_status res_lib_votequorum_status;
+	
+	if ((strlen(name) == 0) ||
+	    (strlen(name) >= VOTEQUORUM_QDEVICE_MAX_NAME_LEN)) {
+		return CS_ERR_INVALID_PARAM;
+	}
+
+	error = hdb_error_to_cs(hdb_handle_get (&votequorum_handle_t_db, handle, (void *)&votequorum_inst));
+	if (error != CS_OK) {
+		return (error);
+	}
+
+	req_lib_votequorum_qdevice_poll.header.size = sizeof (struct req_lib_votequorum_qdevice_poll);
+	req_lib_votequorum_qdevice_poll.header.id = MESSAGE_REQ_VOTEQUORUM_QDISK_POLL;
+	strcpy(req_lib_votequorum_qdevice_poll.name, name);
+	req_lib_votequorum_qdevice_poll.cast_vote = cast_vote;
+	marshall_to_mar_votequorum_ring_id(&req_lib_votequorum_qdevice_poll.ring_id, &ring_id);
+
+	iov.iov_base = (char *)&req_lib_votequorum_qdevice_poll;
+	iov.iov_len = sizeof (struct req_lib_votequorum_qdevice_poll);
+
+        error = qb_to_cs_error(qb_ipcc_sendv_recv (
+		votequorum_inst->c,
+		&iov,
+		1,
+                &res_lib_votequorum_status,
+		sizeof (struct res_lib_votequorum_status), CS_IPC_TIMEOUT_MS));
+
+	if (error != CS_OK) {
+		goto error_exit;
+	}
+
+	error = res_lib_votequorum_status.header.error;
+
+error_exit:
+	hdb_handle_put (&votequorum_handle_t_db, handle);
+
+	return (error);
+}
+
+cs_error_t votequorum_qdisk_share_key (votequorum_handle_t handle, uint64_t key) {
+	cs_error_t error;
+	struct votequorum_inst *votequorum_inst;
+	struct iovec iov;
+	struct req_lib_votequorum_qdisk_key req_lib_votequorum_qdisk_key;
+	struct res_lib_votequorum_status res_lib_votequorum_status;
+
+	error = hdb_error_to_cs(hdb_handle_get (&votequorum_handle_t_db, handle, (void *)&votequorum_inst));
+	if (error != CS_OK) {
+		return (error);
+	}
+
+	req_lib_votequorum_qdisk_key.header.size = sizeof (struct req_lib_votequorum_qdisk_key);
+	req_lib_votequorum_qdisk_key.header.id = MESSAGE_REQ_VOTEQUORUM_QDISK_MCAST_KEY;
+	req_lib_votequorum_qdisk_key.ikey = key;
+
+	iov.iov_base = (char *)&req_lib_votequorum_qdisk_key;
+	iov.iov_len = sizeof(struct req_lib_votequorum_qdisk_key);
+
+	error = qb_to_cs_error(qb_ipcc_sendv_recv(votequorum_inst->c,
+	                                          &iov,
+	                                          1,
+	                                          &res_lib_votequorum_status,
+	                                          sizeof(struct res_lib_votequorum_status),
+	                                          CS_IPC_TIMEOUT_MS));
 
 	if (error != CS_OK) {
 		goto error_exit;

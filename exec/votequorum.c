@@ -39,6 +39,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <unistd.h>
 
 #include <qb/qblist.h>
@@ -72,7 +73,8 @@ static char qdevice_name[VOTEQUORUM_QDEVICE_MAX_NAME_LEN];
 static struct cluster_node *qdevice = NULL;
 static unsigned int qdevice_timeout = VOTEQUORUM_QDEVICE_DEFAULT_TIMEOUT;
 static unsigned int qdevice_sync_timeout = VOTEQUORUM_QDEVICE_DEFAULT_SYNC_TIMEOUT;
-static uint8_t qdevice_can_operate = 1;
+static uint8_t qdevice_can_operate = 0;
+static uint8_t qdisk_can_operate = 0; 
 static void *qdevice_reg_conn = NULL;
 static uint8_t qdevice_master_wins = 0;
 
@@ -131,6 +133,20 @@ struct req_exec_quorum_qdevice_reconfigure {
 	char	newname[VOTEQUORUM_QDEVICE_MAX_NAME_LEN];
 } __attribute__((packed));
 
+struct req_exec_quorum_qdisk_vote {
+	struct	qb_ipc_request_header header __attribute__((aligned(8)));
+	int cast_vote;
+	struct memb_ring_id ring_id;
+} __attribute__((packed));
+
+struct req_exec_quorum_qdisk_key {
+	struct	qb_ipc_request_header header __attribute__((aligned(8)));
+	uint64_t ikey;
+	int nodeid;
+	int seq;
+	
+} __attribute__((packed));
+
 /*
  * votequorum_exec onwire version (via totem)
  */
@@ -145,6 +161,8 @@ struct req_exec_quorum_qdevice_reconfigure {
 #define MESSAGE_REQ_EXEC_VOTEQUORUM_RECONFIGURE         1
 #define MESSAGE_REQ_EXEC_VOTEQUORUM_QDEVICE_REG         2
 #define MESSAGE_REQ_EXEC_VOTEQUORUM_QDEVICE_RECONFIGURE 3
+#define MESSAGE_REQ_EXEC_VOTEQUORUM_QDISK_VOTE          4
+#define MESSAGE_REQ_EXEC_VOTEQUORUM_QDISK_KEY           5
 
 static void votequorum_exec_send_expectedvotes_notification(void);
 static int votequorum_exec_send_quorum_notification(void *conn, uint64_t context);
@@ -174,6 +192,9 @@ static int votequorum_exec_send_reconfigure(uint8_t param, unsigned int nodeid, 
 #define NODE_FLAGS_QDEVICE_ALIVE        32
 #define NODE_FLAGS_QDEVICE_CAST_VOTE    64
 #define NODE_FLAGS_QDEVICE_MASTER_WINS 128
+#define NODE_FLAGS_QDISK_ALIVE         256
+#define NODE_FLAGS_QDISK_CAST_VOTE     512
+#define NODE_FLAGS_QDISK_RECV_VOTE     1024
 
 typedef enum {
 	NODESTATE_MEMBER=1,
@@ -210,7 +231,8 @@ static int quorum_members_entries = 0;
 static int previous_quorum_members_entries = 0;
 static int atb_nodelist_entries = 0;
 static struct memb_ring_id quorum_ringid;
-
+static uint64_t qdisk_ikey = 0;
+static int qdisk_key_set = 0;
 /*
  * pre allocate all cluster_nodes + one for qdevice
  */
@@ -267,6 +289,7 @@ static quorum_set_quorate_fn_t quorum_callback;
 static char *votequorum_exec_init_fn (struct corosync_api_v1 *api);
 static int votequorum_exec_exit_fn (void);
 static int votequorum_exec_send_nodeinfo(uint32_t nodeid);
+static int votequorum_exec_send_qdisk_poll(int cast_vote);
 
 static void message_handler_req_exec_votequorum_nodeinfo (
 	const void *message,
@@ -288,6 +311,18 @@ static void message_handler_req_exec_votequorum_qdevice_reconfigure (
 	unsigned int nodeid);
 static void exec_votequorum_qdevice_reconfigure_endian_convert (void *message);
 
+static void message_handler_req_exec_votequorum_qdisk_poll (
+	const void *message,
+	unsigned int nodeid);
+static void message_handler_req_exec_votequorum_qdisk_poll_endian_convert (void *message);
+
+
+static void message_handler_req_exec_votequorum_qdisk_key (
+	const void *message,
+	unsigned int nodeid);
+static void message_handler_req_exec_votequorum_qdisk_key_endian_convert (void *message);
+
+
 static struct corosync_exec_handler votequorum_exec_engine[] =
 {
 	{ /* 0 */
@@ -306,6 +341,14 @@ static struct corosync_exec_handler votequorum_exec_engine[] =
 		.exec_handler_fn	= message_handler_req_exec_votequorum_qdevice_reconfigure,
 		.exec_endian_convert_fn	= exec_votequorum_qdevice_reconfigure_endian_convert
 	},
+	{ /* 4 */
+		.exec_handler_fn	= message_handler_req_exec_votequorum_qdisk_poll,
+		.exec_endian_convert_fn	= message_handler_req_exec_votequorum_qdisk_poll_endian_convert
+	},
+	{ /* 5 */
+		.exec_handler_fn	= message_handler_req_exec_votequorum_qdisk_key,
+		.exec_endian_convert_fn	= message_handler_req_exec_votequorum_qdisk_key_endian_convert
+	},
 };
 
 /*
@@ -317,6 +360,8 @@ static int quorum_lib_init_fn (void *conn);
 static int quorum_lib_exit_fn (void *conn);
 
 static void qdevice_timer_fn(void *arg);
+
+static void qdisk_timer_fn(void *arg);
 
 static void message_handler_req_lib_votequorum_getinfo (void *conn,
 							const void *message);
@@ -347,6 +392,13 @@ static void message_handler_req_lib_votequorum_qdevice_poll (void *conn,
 
 static void message_handler_req_lib_votequorum_qdevice_master_wins (void *conn,
 							     const void *message);
+
+static void message_handler_req_lib_votequorum_qdisk_mcast_poll (void *conn,
+							     const void *message);
+
+static void message_handler_req_lib_votequorum_qdisk_mcast_key (void *conn,
+							     const void *message);
+								 
 
 static struct corosync_lib_handler quorum_lib_service[] =
 {
@@ -388,6 +440,14 @@ static struct corosync_lib_handler quorum_lib_service[] =
 	},
 	{ /* 9 */
 		.lib_handler_fn		= message_handler_req_lib_votequorum_qdevice_master_wins,
+		.flow_control		= COROSYNC_LIB_FLOW_CONTROL_NOT_REQUIRED
+	},
+	{ /* 10 */
+		.lib_handler_fn		= message_handler_req_lib_votequorum_qdisk_mcast_poll,
+		.flow_control		= COROSYNC_LIB_FLOW_CONTROL_NOT_REQUIRED
+	},
+	{ /* 11 */
+		.lib_handler_fn		= message_handler_req_lib_votequorum_qdisk_mcast_key,
 		.flow_control		= COROSYNC_LIB_FLOW_CONTROL_NOT_REQUIRED
 	}
 };
@@ -758,7 +818,7 @@ static void decode_flags(uint32_t flags)
 	ENTER();
 
 	log_printf(LOGSYS_LEVEL_DEBUG,
-		   "flags: quorate: %s Leaving: %s WFA Status: %s First: %s Qdevice: %s QdeviceAlive: %s QdeviceCastVote: %s QdeviceMasterWins: %s",
+		   "flags: quorate: %s Leaving: %s WFA Status: %s First: %s Qdevice: %s QdeviceAlive: %s QdeviceCastVote: %s QdeviceMasterWins: %s QDiskAlive: %s QDiskCastVote: %s QDiskRecvVote: %s",
 		   (flags & NODE_FLAGS_QUORATE)?"Yes":"No",
 		   (flags & NODE_FLAGS_LEAVING)?"Yes":"No",
 		   (flags & NODE_FLAGS_WFASTATUS)?"Yes":"No",
@@ -766,7 +826,10 @@ static void decode_flags(uint32_t flags)
 		   (flags & NODE_FLAGS_QDEVICE_REGISTERED)?"Yes":"No",
 		   (flags & NODE_FLAGS_QDEVICE_ALIVE)?"Yes":"No",
 		   (flags & NODE_FLAGS_QDEVICE_CAST_VOTE)?"Yes":"No",
-		   (flags & NODE_FLAGS_QDEVICE_MASTER_WINS)?"Yes":"No");
+		   (flags & NODE_FLAGS_QDEVICE_MASTER_WINS)?"Yes":"No",
+		   (flags & NODE_FLAGS_QDISK_ALIVE)?"Yes":"No",
+		   (flags & NODE_FLAGS_QDISK_CAST_VOTE)?"Yes":"No",
+		   (flags & NODE_FLAGS_QDISK_RECV_VOTE)?"Yes":"No");
 
 	LEAVE();
 }
@@ -859,6 +922,16 @@ static void update_qdevice_can_operate(uint8_t status)
 	LEAVE();
 }
 
+static void update_qdisk_can_operate(uint8_t status)
+{
+	ENTER();
+
+	qdisk_can_operate = status;
+	icmap_set_uint8("runtime.votequorum.qdisk_can_operate", qdisk_can_operate);
+
+	LEAVE();
+}
+
 static void update_qdevice_master_wins(uint8_t allow)
 {
 	ENTER();
@@ -931,11 +1004,19 @@ static int calculate_quorum(int allow_decrease, unsigned int max_expected, unsig
 		}
 	}
 
+	//update total votes for qdevice
 	if (us->flags & NODE_FLAGS_QDEVICE_CAST_VOTE) {
 		log_printf(LOGSYS_LEVEL_DEBUG, "node 0 state=1, votes=%u", qdevice->votes);
 		total_votes += qdevice->votes;
 		total_nodes++;
 	}
+
+	//update total votes for qdisk
+ 	if (us->flags & NODE_FLAGS_QDISK_CAST_VOTE) {
+		log_printf(LOGSYS_LEVEL_DEBUG, "node 0 state=1, votes=%u", 1);
+		total_votes += 1;
+		total_nodes++;
+	} 
 
 	if (max_expected > 0) {
 		highest_expected = max_expected;
@@ -1145,7 +1226,8 @@ static void recalculate_quorum(int allow_decrease, int by_current_nodes)
 
 static int votequorum_read_nodelist_configuration(uint32_t *votes,
 						  uint32_t *nodes,
-						  uint32_t *expected_votes)
+						  uint32_t *expected_votes,
+						  uint32_t *one_vote_per_node)
 {
 	icmap_iter_t iter;
 	const char *iter_key;
@@ -1155,6 +1237,8 @@ static int votequorum_read_nodelist_configuration(uint32_t *votes,
 	uint32_t nodelist_expected_votes = 0;
 	uint32_t node_votes = 0;
 	int res = 0;
+
+	*one_vote_per_node=1;
 
 	ENTER();
 
@@ -1186,11 +1270,15 @@ static int votequorum_read_nodelist_configuration(uint32_t *votes,
 		nodecount++;
 
 		snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "nodelist.node.%u.quorum_votes", node_pos);
-		if (icmap_get_uint32(tmp_key, &node_votes) != CS_OK) {
+		cs_error_t err = icmap_get_uint32(tmp_key, &node_votes);
+		if ( err != CS_OK) {
 			node_votes = 1;
 		}
 
 		nodelist_expected_votes = nodelist_expected_votes + node_votes;
+		if (node_votes != 1 ) {
+			*one_vote_per_node = 0 ;
+		}
 
 		if (node_pos == our_pos) {
 			*votes = node_votes;
@@ -1207,6 +1295,44 @@ static int votequorum_read_nodelist_configuration(uint32_t *votes,
 	return 1;
 }
 
+static int add_qdisk_key(uint64_t key, uint32_t nodeid) {
+	icmap_iter_t iter;
+	const char *iter_key;
+	int res;
+	uint32_t node_pos, cur_nodeid;
+	char tmp_key[ICMAP_KEYNAME_MAXLEN] = { 0 };
+
+	ENTER();
+
+	iter = icmap_iter_init("nodelist.node.");
+
+	while ((iter_key = icmap_iter_next(iter, NULL, NULL)) != NULL) {
+		res = sscanf(iter_key, "nodelist.node.%u.%s", &node_pos, tmp_key);
+		if (res != 2) {
+			continue;
+		}
+		
+		if (strcmp(tmp_key, "nodeid") == 0) {
+			icmap_get_uint32(iter_key, &cur_nodeid);
+			if(cur_nodeid == nodeid) {
+				char string_key[2*sizeof(uint64_t) + 1] = {0};
+				snprintf(tmp_key, sizeof(tmp_key),"nodelist.node.%u.prkey", node_pos);
+				snprintf(string_key, sizeof(string_key), "%016" SCNx64, key);
+				icmap_set_string(tmp_key, string_key);
+				// icmap_set_uint64(tmp_key, key);
+				icmap_iter_finalize(iter);
+				return 1;
+			}
+		}
+	}
+
+	icmap_iter_finalize(iter);
+
+	LEAVE();
+
+	return 0;
+}
+
 static int votequorum_qdevice_is_configured(uint32_t *qdevice_votes)
 {
 	char *qdevice_model = NULL;
@@ -1215,7 +1341,7 @@ static int votequorum_qdevice_is_configured(uint32_t *qdevice_votes)
 	ENTER();
 
 	if (icmap_get_string("quorum.device.model", &qdevice_model) == CS_OK) {
-		if (strlen(qdevice_model)) {
+		if (strlen(qdevice_model) && strcmp("net",qdevice_model) == 0) {
 			if (icmap_get_uint32("quorum.device.votes", qdevice_votes) != CS_OK) {
 				*qdevice_votes = -1;
 			}
@@ -1237,6 +1363,57 @@ static int votequorum_qdevice_is_configured(uint32_t *qdevice_votes)
 	return ret;
 }
 
+static int votequorum_qdisk_is_configured(uint32_t *qdevice_votes)
+{
+	char *qdevice_model = NULL;
+	char *qdisk_device = NULL;
+	uint32_t qdisk_heartbeat = 0;
+	uint32_t qdisk_timeout = 0;
+	int ret = 0;
+
+	ENTER();
+
+	if (icmap_get_string("quorum.device.model", &qdevice_model) == CS_OK) {
+		cs_error_t err = CS_OK;
+		err = icmap_get_string("quorum.device.disk.device", &qdisk_device);
+		if(CS_OK != err){
+			ret = 0;
+			goto exit;
+		}
+		err = icmap_get_uint32("quorum.device.disk.heartbeat",&qdisk_heartbeat);
+		if(CS_OK != err){
+			ret = 0;
+			goto exit;
+		}
+		err = icmap_get_uint32("quorum.device.disk.timeout",&qdisk_timeout);
+		if(CS_OK != err){
+			ret = 0;
+			goto exit;
+		}
+
+		if (icmap_get_uint32("quorum.device.votes", qdevice_votes) != CS_OK) {
+			*qdevice_votes = -1;
+		}
+
+		if(*qdevice_votes != 1) {
+			ret = 0;
+			goto exit;
+		}
+		if (strlen(qdevice_model) && strcmp("disk",qdevice_model) == 0 && strlen(qdisk_device)
+		    && qdisk_heartbeat > 0 && qdisk_timeout > 0) {
+			update_qdisk_can_operate(1);
+			ret = 1;
+		}
+
+		free(qdevice_model);
+		free(qdisk_device);
+	}
+exit:
+	LEAVE();
+
+	return ret;
+}
+
 #define VOTEQUORUM_READCONFIG_STARTUP 0
 #define VOTEQUORUM_READCONFIG_RUNTIME 1
 
@@ -1245,8 +1422,9 @@ static char *votequorum_readconfig(int runtime)
 	uint32_t node_votes = 0, qdevice_votes = 0;
 	uint32_t node_expected_votes = 0, expected_votes = 0;
 	uint32_t node_count = 0;
+	uint32_t one_vote_per_node = 1;
 	uint8_t atb = 0;
-	int have_nodelist, have_qdevice;
+	int have_nodelist, have_qdevice, have_qdisk;
 	char *atb_string = NULL;
 	char *error = NULL;
 
@@ -1273,8 +1451,23 @@ static char *votequorum_readconfig(int runtime)
 	 * gather basic data here
 	 */
 	(void)icmap_get_uint32("quorum.expected_votes", &expected_votes);
-	have_nodelist = votequorum_read_nodelist_configuration(&node_votes, &node_count, &node_expected_votes);
+	have_nodelist = votequorum_read_nodelist_configuration(&node_votes, &node_count, &node_expected_votes,&one_vote_per_node);
+	if( have_nodelist ) {
+		icmap_set_uint32("nodelist.node_count", node_count);
+	}
 	have_qdevice = votequorum_qdevice_is_configured(&qdevice_votes);
+	have_qdisk = votequorum_qdisk_is_configured(&qdevice_votes);
+
+	if(have_qdevice && have_qdisk){
+		error = (char *)"configuration error: Cannot start with a network based qdevice and qdisk configured at the same time";
+		goto out;
+	}
+	
+	if (!one_vote_per_node && have_qdisk){
+		error = (char *)"configuration error: Qdisk only supports each cluster node having 1 vote";
+		goto out;
+	}
+
 	(void)icmap_get_uint8("quorum.two_node", &two_node);
 
 	/*
@@ -1412,7 +1605,7 @@ static char *votequorum_readconfig(int runtime)
 	 * been enabled at startup.
 	 */
 
-	if ((have_qdevice) && (last_man_standing)) {
+	if ((have_qdevice || have_qdisk) && (last_man_standing)) {
 		if (!runtime) {
 			error = (char *)"configuration error: quorum.device is not compatible with last_man_standing";
 			goto out;
@@ -1420,10 +1613,11 @@ static char *votequorum_readconfig(int runtime)
 			log_printf(LOGSYS_LEVEL_CRIT, "configuration error: quorum.device is not compatible with last_man_standing");
 			log_printf(LOGSYS_LEVEL_CRIT, "disabling quorum device operations");
 			update_qdevice_can_operate(0);
+			update_qdisk_can_operate(0);
 		}
 	}
-
-	if ((have_qdevice) && (auto_tie_breaker != ATB_NONE)) {
+	
+	if ((have_qdevice || have_qdisk ) && (auto_tie_breaker != ATB_NONE)) {
 		if (!runtime) {
 			error = (char *)"configuration error: quorum.device is not compatible with auto_tie_breaker";
 			goto out;
@@ -1431,10 +1625,11 @@ static char *votequorum_readconfig(int runtime)
 			log_printf(LOGSYS_LEVEL_CRIT, "configuration error: quorum.device is not compatible with auto_tie_breaker");
 			log_printf(LOGSYS_LEVEL_CRIT, "disabling quorum device operations");
 			update_qdevice_can_operate(0);
+			update_qdisk_can_operate(0);
 		}
 	}
-
-	if ((have_qdevice) && (allow_downscale)) {
+	
+	if ((have_qdevice || have_qdisk ) && (allow_downscale)) {
 		if (!runtime) {
 			error = (char *)"configuration error: quorum.device is not compatible with allow_downscale";
 			goto out;
@@ -1442,6 +1637,7 @@ static char *votequorum_readconfig(int runtime)
 			log_printf(LOGSYS_LEVEL_CRIT, "configuration error: quorum.device is not compatible with allow_downscale");
 			log_printf(LOGSYS_LEVEL_CRIT, "disabling quorum device operations");
 			update_qdevice_can_operate(0);
+			update_qdisk_can_operate(0);
 		}
 	}
 
@@ -1540,7 +1736,7 @@ static char *votequorum_readconfig(int runtime)
 		qdevice->votes = 0;
 	}
 
-	if (qdevice_votes != -1) {
+	if (!have_qdisk && qdevice_votes != -1) {
 		qdevice->votes = qdevice_votes;
 	}
 
@@ -1720,6 +1916,62 @@ static int votequorum_exec_send_nodeinfo(uint32_t nodeid)
 
 	iov[0].iov_base = (void *)&req_exec_quorum_nodeinfo;
 	iov[0].iov_len = sizeof(req_exec_quorum_nodeinfo);
+
+	ret = corosync_api->totem_mcast (iov, 1, TOTEM_AGREED);
+
+	LEAVE();
+	return ret;
+}
+
+static int votequorum_exec_send_qdisk_poll(int cast_vote)
+{
+	struct req_exec_quorum_qdisk_vote req_exec_quorum_qdisk_vote;
+	struct iovec iov[1];
+	struct cluster_node *node;
+	int ret;
+
+	ENTER();
+
+	memset(&req_exec_quorum_qdisk_vote, 0, sizeof(req_exec_quorum_qdisk_vote));
+	req_exec_quorum_qdisk_vote.cast_vote=cast_vote;
+	req_exec_quorum_qdisk_vote.ring_id.nodeid=quorum_ringid.nodeid;
+	req_exec_quorum_qdisk_vote.ring_id.seq=quorum_ringid.seq;
+
+	//if (nodeid != VOTEQUORUM_QDEVICE_NODEID) {
+	//	decode_flags(node->flags);
+	//}
+
+	req_exec_quorum_qdisk_vote.header.id = SERVICE_ID_MAKE(VOTEQUORUM_SERVICE, MESSAGE_REQ_EXEC_VOTEQUORUM_QDISK_VOTE);
+	req_exec_quorum_qdisk_vote.header.size = sizeof(req_exec_quorum_qdisk_vote);
+
+	iov[0].iov_base = (void *)&req_exec_quorum_qdisk_vote;
+	iov[0].iov_len = sizeof(req_exec_quorum_qdisk_vote);
+
+	ret = corosync_api->totem_mcast (iov, 1, TOTEM_AGREED);
+
+	LEAVE();
+	return ret;
+}
+
+static int votequorum_exec_send_qdisk_key(uint64_t key, int seq)
+{
+	struct req_exec_quorum_qdisk_key req_exec_quorum_qdisk_key;
+	struct iovec iov[1];
+	struct cluster_node *node;
+	int ret;
+
+	ENTER();
+
+	memset(&req_exec_quorum_qdisk_key, 0, sizeof(req_exec_quorum_qdisk_key));
+	req_exec_quorum_qdisk_key.ikey = key;
+	req_exec_quorum_qdisk_key.nodeid=us->node_id;
+	req_exec_quorum_qdisk_key.seq=seq;
+	
+	req_exec_quorum_qdisk_key.header.id = SERVICE_ID_MAKE(VOTEQUORUM_SERVICE, MESSAGE_REQ_EXEC_VOTEQUORUM_QDISK_KEY);
+	req_exec_quorum_qdisk_key.header.size = sizeof(req_exec_quorum_qdisk_key);
+
+	iov[0].iov_base = (void *)&req_exec_quorum_qdisk_key;
+	iov[0].iov_len = sizeof(req_exec_quorum_qdisk_key);
 
 	ret = corosync_api->totem_mcast (iov, 1, TOTEM_AGREED);
 
@@ -1947,6 +2199,115 @@ static void message_handler_req_exec_votequorum_qdevice_reconfigure (
 	LEAVE();
 }
 
+static void message_handler_req_exec_votequorum_qdisk_poll_endian_convert (void *message)
+{
+	struct req_exec_quorum_qdisk_vote * req_exec_quorum_qdisk_vote = message;
+
+	ENTER();
+
+	swab32(req_exec_quorum_qdisk_vote->cast_vote);
+	LEAVE();
+}
+
+static void message_handler_req_exec_votequorum_qdisk_key_endian_convert (void *message)
+{
+	struct req_exec_quorum_qdisk_key * req_exec_quorum_qdisk_key = message;
+
+	ENTER();
+
+	swab32(req_exec_quorum_qdisk_key->nodeid);
+	swab64(req_exec_quorum_qdisk_key->ikey);
+
+	LEAVE();
+}
+
+static void message_handler_req_exec_votequorum_qdisk_poll (
+	const void *message,
+	unsigned int nodeid)
+{
+	const struct req_exec_quorum_qdisk_vote *req_exec_quorum_qdisk_vote = message;
+	cs_error_t error = CS_OK;
+	uint32_t oldflags;
+
+	ENTER();
+
+	//DO WHAT QDEVICE POLL DOES HERE
+	if (!qdisk_can_operate) {
+		error = CS_ERR_ACCESS;
+		goto out;
+	}
+	if(qdisk_key_set) {
+		if (!(req_exec_quorum_qdisk_vote->ring_id.nodeid == quorum_ringid.nodeid &&
+			req_exec_quorum_qdisk_vote->ring_id.seq == quorum_ringid.seq)) {
+			log_printf(LOGSYS_LEVEL_DEBUG, "Received poll ring id (" CS_PRI_RING_ID ") != last sync "
+			    "ring id (" CS_PRI_RING_ID "). Ignoring poll call.",
+			    req_exec_quorum_qdisk_vote->ring_id.nodeid, req_exec_quorum_qdisk_vote->ring_id.seq,
+			    quorum_ringid.nodeid, quorum_ringid.seq);
+			error = CS_ERR_MESSAGE_ERROR;
+			goto out;
+		}
+
+		if (qdevice_timer_set) {
+			corosync_api->timer_delete(qdevice_timer);
+			qdevice_timer_set = 0;
+		}
+
+		oldflags = us->flags;
+
+		us->flags |= NODE_FLAGS_QDISK_ALIVE;
+
+		if (req_exec_quorum_qdisk_vote->cast_vote) {
+			us->flags |= NODE_FLAGS_QDISK_CAST_VOTE;
+			if(us->node_id!=nodeid){
+				us->flags |= NODE_FLAGS_QDISK_RECV_VOTE;
+			}
+		} else {
+			us->flags &= ~NODE_FLAGS_QDISK_CAST_VOTE;
+			if(us->node_id!=nodeid){
+				us->flags &= ~NODE_FLAGS_QDISK_RECV_VOTE;
+			}
+		}
+
+		votequorum_exec_send_nodeinfo(us->node_id);
+
+		corosync_api->timer_add_duration((unsigned long long)qdevice_timeout*1000000, qdevice,
+						 qdisk_timer_fn, &qdevice_timer);
+		qdevice_timer_set = 1;
+		sync_wait_for_poll_or_timeout = 0;
+	} else {
+		error = CS_ERR_NOT_EXIST;
+	}
+
+//MODIFY TO SEND RESPONSE STATUS BACK	
+out:
+//	res_lib_votequorum_status.header.size = sizeof(res_lib_votequorum_status);
+//	res_lib_votequorum_status.header.id = MESSAGE_RES_VOTEQUORUM_STATUS;
+//	res_lib_votequorum_status.header.error = error;
+//	corosync_api->ipc_response_send(conn, &res_lib_votequorum_status, sizeof(res_lib_votequorum_status));
+
+	LEAVE();
+}
+
+static void message_handler_req_exec_votequorum_qdisk_key(const void *message, unsigned int nodeid)
+{
+	const struct req_exec_quorum_qdisk_key *req_exec_quorum_qdisk_key = message;
+	cs_error_t error = CS_OK;
+
+	ENTER();
+
+	printf("Receiving qdisk key: %016" PRIx64 ", from nodeid: %u\n", req_exec_quorum_qdisk_key->ikey, req_exec_quorum_qdisk_key->nodeid);
+
+	if(req_exec_quorum_qdisk_key->nodeid == us->node_id || req_exec_quorum_qdisk_key->seq > 1) {
+		return;
+	}
+	if(qdisk_key_set) {
+		votequorum_exec_send_qdisk_key(qdisk_ikey, req_exec_quorum_qdisk_key->seq + 1);
+	}
+	add_qdisk_key(req_exec_quorum_qdisk_key->ikey, req_exec_quorum_qdisk_key->nodeid);
+
+	LEAVE();
+}
+
 static void exec_votequorum_qdevice_reg_endian_convert (void *message)
 {
 	struct req_exec_quorum_qdevice_reg *req_exec_quorum_qdevice_reg = message;
@@ -1978,6 +2339,8 @@ static void message_handler_req_exec_votequorum_qdevice_reg (
 	switch(req_exec_quorum_qdevice_reg->operation)
 	{
 	case VOTEQUORUM_QDEVICE_OPERATION_REGISTER:
+		/*if this isn't the node that sent the registration record the name of the qdevice 
+		 and then leave*/
 		if (nodeid != us->node_id) {
 			if (!strlen(qdevice_name)) {
 				log_printf(LOGSYS_LEVEL_DEBUG, "Remote qdevice name recorded");
@@ -2015,6 +2378,7 @@ static void message_handler_req_exec_votequorum_qdevice_reg (
 
 		/*
 		 * check if it is our device or something else
+		 * If the device name that is registering matches the requests name 
 		 */
 		if ((!strncmp(req_exec_quorum_qdevice_reg->qdevice_name,
 			      qdevice_name, VOTEQUORUM_QDEVICE_MAX_NAME_LEN))) {
@@ -2550,13 +2914,35 @@ static void qdevice_timer_fn(void *arg)
 	ENTER();
 
 	if ((!(us->flags & NODE_FLAGS_QDEVICE_ALIVE)) ||
-	    (!qdevice_timer_set)) {
+		(!qdevice_timer_set)) {
 		LEAVE();
 		return;
 	}
 
 	us->flags &= ~NODE_FLAGS_QDEVICE_ALIVE;
 	us->flags &= ~NODE_FLAGS_QDEVICE_CAST_VOTE;
+	log_printf(LOGSYS_LEVEL_INFO, "lost contact with quorum device %s", qdevice_name);
+	votequorum_exec_send_nodeinfo(us->node_id);
+
+	qdevice_timer_set = 0;
+	sync_wait_for_poll_or_timeout = 0;
+	
+	LEAVE();
+}
+
+static void qdisk_timer_fn(void *arg)
+{
+	ENTER();
+
+	if ((!(us->flags & NODE_FLAGS_QDISK_ALIVE)) ||
+		(!qdevice_timer_set)) {
+		LEAVE();
+		return;
+	}
+
+	us->flags &= ~NODE_FLAGS_QDISK_ALIVE;
+	us->flags &= ~NODE_FLAGS_QDISK_CAST_VOTE;
+	us->flags &= ~NODE_FLAGS_QDISK_RECV_VOTE;
 	log_printf(LOGSYS_LEVEL_INFO, "lost contact with quorum device %s", qdevice_name);
 	votequorum_exec_send_nodeinfo(us->node_id);
 
@@ -2606,6 +2992,10 @@ static void message_handler_req_lib_votequorum_getinfo (void *conn, const void *
 		if (node->flags & NODE_FLAGS_QDEVICE_CAST_VOTE) {
 			total_votes += qdevice->votes;
 		}
+
+		if (node->flags & NODE_FLAGS_QDISK_CAST_VOTE) {
+			total_votes += 1;
+		} 
 
 		switch(node->state) {
 			case NODESTATE_MEMBER:
@@ -2665,6 +3055,18 @@ static void message_handler_req_lib_votequorum_getinfo (void *conn, const void *
 		}
 		if (node->flags & NODE_FLAGS_QDEVICE_MASTER_WINS) {
 			res_lib_votequorum_getinfo.flags |= VOTEQUORUM_INFO_QDEVICE_MASTER_WINS;
+		}
+		if (node->flags & NODE_FLAGS_QDISK_CAST_VOTE) {
+			res_lib_votequorum_getinfo.flags |= VOTEQUORUM_INFO_QDISK_CAST_VOTE;
+		}
+		if (node->flags & NODE_FLAGS_QDISK_RECV_VOTE) {
+			res_lib_votequorum_getinfo.flags |= VOTEQUORUM_INFO_QDISK_RECV_VOTE;
+		}
+		if(qdisk_key_set) {
+			res_lib_votequorum_getinfo.qdisk_ikey = qdisk_ikey;
+		}
+		else {
+			res_lib_votequorum_getinfo.qdisk_ikey = 0;
 		}
 	} else {
 		error = CS_ERR_NOT_EXIST;
@@ -2984,7 +3386,6 @@ static void message_handler_req_lib_votequorum_qdevice_poll (void *conn,
 		error = CS_ERR_ACCESS;
 		goto out;
 	}
-
 	if (us->flags & NODE_FLAGS_QDEVICE_REGISTERED) {
 		if (!(req_lib_votequorum_qdevice_poll->ring_id.nodeid == quorum_ringid.nodeid &&
 		      req_lib_votequorum_qdevice_poll->ring_id.seq == quorum_ringid.seq)) {
@@ -3079,4 +3480,101 @@ out:
 	corosync_api->ipc_response_send(conn, &res_lib_votequorum_status, sizeof(res_lib_votequorum_status));
 
 	LEAVE();
+}
+
+static void message_handler_req_lib_votequorum_qdisk_mcast_poll (void *conn,
+                                                                 const void *message)
+{
+	const struct req_lib_votequorum_qdevice_poll *req_lib_votequorum_qdevice_poll = message;
+	struct res_lib_votequorum_status res_lib_votequorum_status;
+	cs_error_t error = CS_OK;
+
+	ENTER();
+
+	//Need to update configuration logic for qdevice and qdisk in votequorum_readconfig()
+	if (!qdisk_can_operate) {
+		error = CS_ERR_ACCESS;
+		goto out;
+	}
+
+	if (qdisk_key_set) {
+
+		//ensure that the ring and seq id in the request belong to this node's partition
+		if (!(req_lib_votequorum_qdevice_poll->ring_id.nodeid == quorum_ringid.nodeid &&
+			req_lib_votequorum_qdevice_poll->ring_id.seq == quorum_ringid.seq)) {
+
+			log_printf(LOGSYS_LEVEL_DEBUG, "Received poll ring id (" CS_PRI_RING_ID ") != last sync "
+			"ring id (" CS_PRI_RING_ID "). Ignoring poll call.",
+			req_lib_votequorum_qdevice_poll->ring_id.nodeid, req_lib_votequorum_qdevice_poll->ring_id.seq,
+			quorum_ringid.nodeid, quorum_ringid.seq);
+
+			error = CS_ERR_MESSAGE_ERROR;
+			goto out;
+		}
+
+		//if there is a timer set for polling remove it 
+		if (qdevice_timer_set) {
+			corosync_api->timer_delete(qdevice_timer);
+			qdevice_timer_set = 0;
+		}
+
+		us->flags |= NODE_FLAGS_QDISK_ALIVE;
+
+		//set the quorum disk cast vote flag
+		if (req_lib_votequorum_qdevice_poll->cast_vote) {
+			us->flags |= NODE_FLAGS_QDISK_CAST_VOTE;
+		} else {
+			us->flags &= ~NODE_FLAGS_QDISK_CAST_VOTE;
+		}
+
+		int cast_vote=1;
+		votequorum_exec_send_qdisk_poll(cast_vote);
+
+		corosync_api->timer_add_duration((unsigned long long)qdevice_timeout*1000000, qdevice,
+		qdisk_timer_fn, &qdevice_timer);
+		qdevice_timer_set = 1;
+		sync_wait_for_poll_or_timeout = 0;
+	} else {
+		error = CS_ERR_NOT_EXIST;
+	}
+
+out:
+	res_lib_votequorum_status.header.size = sizeof(res_lib_votequorum_status);
+	res_lib_votequorum_status.header.id = MESSAGE_RES_VOTEQUORUM_STATUS;
+	res_lib_votequorum_status.header.error = error;
+	corosync_api->ipc_response_send(conn, &res_lib_votequorum_status, sizeof(res_lib_votequorum_status));
+
+	LEAVE();
+}
+
+static void message_handler_req_lib_votequorum_qdisk_mcast_key (void *conn,
+                                                                const void *message)
+{
+	const struct req_lib_votequorum_qdisk_key *req_lib_votequorum_qdevice_key = message;
+	struct res_lib_votequorum_status res_lib_votequorum_status;
+	cs_error_t error = CS_OK;
+
+	ENTER();
+	
+
+	qdisk_ikey = req_lib_votequorum_qdevice_key->ikey;
+	qdisk_key_set = 1;
+
+	if(add_qdisk_key(req_lib_votequorum_qdevice_key->ikey,us->node_id) != 1){
+		error=CS_ERR_FAILED_OPERATION;
+		goto out;
+	}
+	if (CS_OK != votequorum_exec_send_qdisk_key(req_lib_votequorum_qdevice_key->ikey,0)){
+		error=CS_ERR_FAILED_OPERATION;
+	}
+
+	error = CS_OK;
+out:
+	res_lib_votequorum_status.header.size = sizeof(res_lib_votequorum_status);
+	res_lib_votequorum_status.header.id = MESSAGE_RES_VOTEQUORUM_STATUS;
+	res_lib_votequorum_status.header.error = error;
+	corosync_api->ipc_response_send(conn, &res_lib_votequorum_status, sizeof(res_lib_votequorum_status));
+
+	LEAVE();
+
 }

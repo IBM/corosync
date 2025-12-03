@@ -1,0 +1,22 @@
+[Unit]
+Description=Qdiskd Service
+ConditionKernelCommandLine=!nocluster
+PartOf=corosync.service
+After=corosync.service iscsi.service
+
+
+[Service]
+EnvironmentFile=-${sysconfdir}/sysconfig/corosync-qdiskd
+ExecStart=@QDISKDBINDIR@/qdiskd $COROSYNC_QDISKD_OPTIONS
+User=root
+WorkingDirectory=/
+StandardOutput=journal
+StandardError=journal
+
+Type=notify
+Restart=on-abnormal
+#WatchdogSec=9
+
+[Install]
+#WantedBy=multi-user.target
+WantedBy=corosync.service

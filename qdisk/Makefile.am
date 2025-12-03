@@ -1,10 +1,7 @@
-# Copyright (c) 2004 MontaVista Software, Inc.
-# Copyright (c) 2009 Red Hat, Inc.
 #
-# Authors: Steven Dake (sdake@redhat.com)
-#          Fabio M. Di Nitto (fdinitto@redhat.com)
+# Copyright (c) 2025 IBM, Inc.
 #
-# All rights reserved.
+# Authors: Thomas Jones (thomas.jones@ibm.com)
 #
 # This software licensed under BSD license, the text of which follows:
 #
@@ -32,35 +29,33 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
 # THE POSSIBILITY OF SUCH DAMAGE.
 
-MAINTAINERCLEANFILES	= Makefile.in
+EXTRA_DIST = qdiskd.service.in
 
-EXTRA_DIST = corosync.in corosync-notifyd.in corosync.service.in \
-             corosync-notifyd.service.in \
-             qdiskd.service.in \
-             corosync.sysconfig.example
+MAINTAINERCLEANFILES = Makefile.in
 
-if INSTALL_SYSTEMD
-systemdconfdir	   = $(SYSTEMDDIR)
-systemdconf_DATA   = corosync.service corosync-notifyd.service qdiskd.service
-else
-initscriptdir	   = $(INITDDIR)
-initscript_SCRIPTS  = corosync corosync-notifyd
+if BUILD_QDISKD
+sbin_PROGRAMS = qdiskd
 endif
 
-%: %.in Makefile
-	rm -f $@-t $@
-	cat $< | $(SED) \
-		-e 's#@''SBINDIR@#$(sbindir)#g' \
-		-e 's#@''BINDIR@#$(bindir)#g' \
-		-e 's#@''SYSCONFDIR@#$(sysconfdir)#g' \
-		-e 's#@''INITCONFIGDIR@#$(INITCONFIGDIR)#g' \
-		-e 's#@''INITDDIR@#$(INITDDIR)#g' \
-		-e 's#@''LOCALSTATEDIR@#$(localstatedir)#g' \
-		-e 's#@''BASHPATH@#${BASHPATH}#g' \
-	    > $@-t
-	mv $@-t $@
+SUBDIRS = persistent_reserve
 
-all-local: $(initscript_SCRIPTS) $(systemdconf_DATA)
+qdiskd_SOURCES = \
+main.c \
+algorithm.c \
+algorithm.h \
+cmap.c \
+cmap.h \
+log.c \
+log.h \
+quorum.c \
+quorum.h \
+vquorum.c \
+vquorum.h
+qdiskd_CFLAGS = $(libsystemd_CFLAGS)
+qdiskd_LDADD  = $(top_builddir)/lib/libquorum.la $(top_builddir)/lib/libvotequorum.la \
+                $(top_builddir)/lib/libcmap.la $(top_builddir)/common_lib/libcorosync_common.la \
+                persistent_reserve/libpersistent_reserve.la $(libsystemd_LIBS)
 
-clean-local:
-	rm -rf $(initscript_SCRIPTS) $(systemdconf_DATA)
+
+
+

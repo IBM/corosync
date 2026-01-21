@@ -1,10 +1,7 @@
-# Copyright (c) 2004 MontaVista Software, Inc.
-# Copyright (c) 2009 Red Hat, Inc.
 #
-# Authors: Steven Dake (sdake@redhat.com)
-#          Fabio M. Di Nitto (fdinitto@redhat.com)
+# Copyright (c) 2025 IBM, Inc.
 #
-# All rights reserved.
+# Authors: Thomas Jones (thomas.jones@ibm.com)
 #
 # This software licensed under BSD license, the text of which follows:
 #
@@ -32,35 +29,21 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
 # THE POSSIBILITY OF SUCH DAMAGE.
 
-MAINTAINERCLEANFILES	= Makefile.in
+MAINTAINERCLEANFILES = Makefile.in
 
-EXTRA_DIST = corosync.in corosync-notifyd.in corosync.service.in \
-             corosync-notifyd.service.in \
-             corosync-qdisk.service.in \
-             corosync.sysconfig.example
+noinst_LTLIBRARIES	 = libpersistent_reserve.la
 
-if INSTALL_SYSTEMD
-systemdconfdir	   = $(SYSTEMDDIR)
-systemdconf_DATA   = corosync.service corosync-notifyd.service corosync-qdisk.service
-else
-initscriptdir	   = $(INITDDIR)
-initscript_SCRIPTS  = corosync corosync-notifyd
-endif
+libpersistent_reserve_la_SOURCES = \
+persistent_reserve.c \
+helpers.h \
+nvme_device.c \
+nvme_device.h \
+device.c \
+device.h \
+scsi_device.c \
+scsi_device.h
 
-%: %.in Makefile
-	rm -f $@-t $@
-	cat $< | $(SED) \
-		-e 's#@''SBINDIR@#$(sbindir)#g' \
-		-e 's#@''BINDIR@#$(bindir)#g' \
-		-e 's#@''SYSCONFDIR@#$(sysconfdir)#g' \
-		-e 's#@''INITCONFIGDIR@#$(INITCONFIGDIR)#g' \
-		-e 's#@''INITDDIR@#$(INITDDIR)#g' \
-		-e 's#@''LOCALSTATEDIR@#$(localstatedir)#g' \
-		-e 's#@''BASHPATH@#${BASHPATH}#g' \
-	    > $@-t
-	mv $@-t $@
-
-all-local: $(initscript_SCRIPTS) $(systemdconf_DATA)
-
-clean-local:
-	rm -rf $(initscript_SCRIPTS) $(systemdconf_DATA)
+# program for manual testing of persistant reserve functionality.
+sbin_PROGRAMS = corosync-qdisktool
+corosync_qdisktool_SOURCES = qdisktool.c
+corosync_qdisktool_LDADD = libpersistent_reserve.la

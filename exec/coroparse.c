@@ -754,7 +754,9 @@ static int main_config_parser_cb(const char *path,
 		case MAIN_CP_CB_DATA_STATE_QDEVICE:
 			if ((strcmp(path, "quorum.device.timeout") == 0) ||
 			    (strcmp(path, "quorum.device.sync_timeout") == 0) ||
-			    (strcmp(path, "quorum.device.votes") == 0)) {
+			    (strcmp(path, "quorum.device.votes") == 0) ||
+			    (strcmp(path, "quorum.device.disk.heartbeat") == 0) ||
+			    (strcmp(path, "quorum.device.disk.timeout") == 0)) {
 				val_type = ICMAP_VALUETYPE_UINT32;
 				if (safe_atoq(value, &val, val_type) != 0) {
 					goto safe_atoq_error;

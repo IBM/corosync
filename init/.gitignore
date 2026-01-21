@@ -2,3 +2,4 @@ corosync
 corosync-notifyd
 corosync.service
 corosync-notifyd.service
+corosync-qdisk.service

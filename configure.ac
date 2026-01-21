@@ -222,6 +222,8 @@ AC_CONFIG_FILES([Makefile
 		 tools/Makefile
 		 conf/Makefile
 		 vqsim/Makefile
+		 qdisk/Makefile
+		 qdisk/persistent_reserve/Makefile
 		 Doxyfile
 		 conf/logrotate/Makefile
 		 bindings/Makefile
@@ -443,6 +445,11 @@ AM_CONDITIONAL(BUILD_VQSIM, test x$enable_vqsim = xyes)
 AC_ARG_ENABLE([nozzle],
 	[  --enable-nozzle                 : Support for nozzle ],,
 	[ enable_nozzle="no" ])
+
+AC_ARG_ENABLE([qdisk],
+	      [  --enable-qdisk                : Enable tiebreaker disk daemon],,
+	[ enable_qdisk="no" ])
+AM_CONDITIONAL(BUILD_QDISKD, test x$enable_qdisk = xyes)
 
 # *FLAGS handling goes here
 

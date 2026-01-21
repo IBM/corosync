@@ -207,6 +207,40 @@ out:
 	return err;
 }
 
+static int getNodeIndex (int node_id) {
+	cmap_handle_t cmap_handle;
+	cmap_iter_handle_t cmap_iter_handle = 0;
+	cmap_value_types_t cmap_value_type;
+	int node_pos = -1;
+	uint32_t cur_nodeid;
+	char key[CMAP_KEYNAME_MAXLEN];
+	char tmp_key[CMAP_KEYNAME_MAXLEN];
+	size_t key_size;
+
+	cmap_initialize(&cmap_handle);
+	if(CS_OK != cmap_iter_init(cmap_handle, "nodelist.node.", &cmap_iter_handle)) {
+		return -1;
+	}
+
+	while (CS_OK == cmap_iter_next(cmap_handle, cmap_iter_handle, key, &key_size, &cmap_value_type)) {
+		int res = sscanf(key, "nodelist.node.%u.%s", &node_pos, tmp_key);
+		if (res != 2) {
+			continue;
+		}
+		
+		if (strcmp(tmp_key,"nodeid") == 0) {
+			cmap_get_uint32(cmap_handle, key, &cur_nodeid);
+			if(cur_nodeid == node_id) {
+				break;
+			}
+		}
+	}
+
+	cmap_iter_finalize(cmap_handle, cmap_iter_handle);
+
+	return node_pos;
+}
+
 /*
  * Returns 1 if 'votequorum' is active. The called then knows that
  * votequorum calls should work and can provide extra information
@@ -465,9 +499,16 @@ static int compare_nodenames(const void *one, const void *two)
 
 static void display_nodes_data(nodeid_format_t nodeid_format, name_format_t name_format, sorttype_t sort_type)
 {
-	int i, display_qdevice = 0;
+	uint8_t qdisk_can_operate = 0;
+	int i, display_qdevice = 0, display_qdisk = 0;
 	unsigned int our_flags = 0;
 	struct votequorum_info info[g_view_list_entries];
+
+	if(CS_OK != cmap_get_uint8(cmap_handle, "runtime.votequorum.qdisk_can_operate", &qdisk_can_operate)) {
+		qdisk_can_operate = 0;
+	}
+	display_qdisk = qdisk_can_operate;
+
 	/*
 	 * cache node info because we need to parse them twice
 	 */
@@ -480,6 +521,9 @@ static void display_nodes_data(nodeid_format_t nodeid_format, name_format_t name
 			if (info[i].flags & VOTEQUORUM_INFO_QDEVICE_REGISTERED) {
 				display_qdevice = 1;
 			}
+			// if (info[i].qdisk_ikey) {
+			// 	display_qdisk = 1;
+			// }
 		}
 	}
 
@@ -498,6 +542,9 @@ static void display_nodes_data(nodeid_format_t nodeid_format, name_format_t name
 		print_string_padded("Votes");
 		if ((display_qdevice) || (machine_parsable)) {
 			print_string_padded("Qdevice");
+		}
+		if ((display_qdisk) || (machine_parsable)) {
+			print_string_padded("Qdisk");
 		}
 	}
 	printf("Name\n");
@@ -522,7 +569,7 @@ static void display_nodes_data(nodeid_format_t nodeid_format, name_format_t name
 			print_uint32_padded(votes);
 
 			if ((display_qdevice) || (machine_parsable)) {
-				if (info[i].flags & VOTEQUORUM_INFO_QDEVICE_REGISTERED) {
+				if (info[i].flags & VOTEQUORUM_INFO_QDEVICE_REGISTERED  || 1) {
 					char buf[10];
 
 					snprintf(buf, sizeof(buf),
@@ -535,8 +582,35 @@ static void display_nodes_data(nodeid_format_t nodeid_format, name_format_t name
 					print_string_padded("NR");
 				}
 			}
+
+			if ((display_qdisk) || (machine_parsable)) {
+				if (info[i].flags & (VOTEQUORUM_INFO_QDISK_CAST_VOTE | VOTEQUORUM_INFO_QDISK_RECV_VOTE) ) {
+					char buf[10];
+
+					snprintf(buf, sizeof(buf),
+						 "%s%s",
+						 info[i].flags & VOTEQUORUM_INFO_QDISK_CAST_VOTE?"V":" ",
+						 info[i].flags & VOTEQUORUM_INFO_QDISK_RECV_VOTE?"R":" ");
+					print_string_padded(buf);
+				} else {
+					print_string_padded("N");
+				}
+			}
 		}
-		printf("%s", g_view_list[i].name);
+		if (display_qdisk) {
+			char *key = NULL;
+			char tmp_cmapkey[256] = { 0 };
+			int node_index = getNodeIndex(g_view_list[i].node_id);
+			sprintf(tmp_cmapkey,"nodelist.node.%d.prkey", node_index);
+			cmap_get_string(cmap_handle,tmp_cmapkey, &key);
+			printf("%s (key:%s)", g_view_list[i].name, (key ? key : "<unknown>"));
+            if (key) {
+                free(key);
+            }
+		}
+		else {
+			printf("%s", g_view_list[i].name);
+		}
 		if (g_view_list[i].node_id == our_nodeid) {
 			printf(" (local)");
 			if (v_handle) {
@@ -554,7 +628,7 @@ static void display_nodes_data(nodeid_format_t nodeid_format, name_format_t name
 		g_view_list = NULL;
 	}
 
-	if (display_qdevice) {
+	if (display_qdevice || display_qdisk) {
 		if (nodeid_format == NODEID_FORMAT_DECIMAL) {
 			print_uint32_padded(VOTEQUORUM_QDEVICE_NODEID);
 		} else {
@@ -562,14 +636,19 @@ static void display_nodes_data(nodeid_format_t nodeid_format, name_format_t name
 		}
 		/* If the quorum device is inactive on this node then show votes as 0
 		   so that the display is not confusing */
-		if (our_flags & VOTEQUORUM_INFO_QDEVICE_CAST_VOTE) {
+		if (our_flags & (VOTEQUORUM_INFO_QDEVICE_CAST_VOTE | VOTEQUORUM_INFO_QDISK_CAST_VOTE)) {
 			print_uint32_padded(info[0].qdevice_votes);
 		}
 		else {
 			print_uint32_padded(0);
 		}
-		printf("           %s", info[0].qdevice_name);
-		if (our_flags & VOTEQUORUM_INFO_QDEVICE_CAST_VOTE) {
+		if(display_qdisk) {
+			printf("           Qdisk");
+		}
+		else {
+			printf("           %s", info[0].qdevice_name);
+		}
+		if (our_flags & (VOTEQUORUM_INFO_QDEVICE_CAST_VOTE | VOTEQUORUM_INFO_QDISK_CAST_VOTE)) {
 			printf("\n");
 		}
 		else {
@@ -634,6 +713,7 @@ static int display_quorum_data(int is_quorate,
 		if (info.flags & VOTEQUORUM_INFO_AUTO_TIE_BREAKER) printf("AutoTieBreaker ");
 		if (info.flags & VOTEQUORUM_INFO_ALLOW_DOWNSCALE) printf("AllowDownscale ");
 		if (info.flags & VOTEQUORUM_INFO_QDEVICE_REGISTERED) printf("Qdevice ");
+		if (info.qdisk_ikey) printf("Qdisk ");
 		printf("\n");
 	} else {
 		fprintf(stderr, "Unable to get node info: %s\n", cs_strerror(err));
